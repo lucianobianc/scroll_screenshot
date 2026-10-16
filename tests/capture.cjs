@@ -30,12 +30,38 @@ const assert = require('node:assert/strict');
       const bitmap = await createImageBitmap(await (await fetch(url)).blob());
       const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
       const ctx = canvas.getContext('2d'); ctx.drawImage(bitmap, 0, 0);
-      return { width: bitmap.width, height: bitmap.height, colors: [400, 1000, 2200].map(y => [...ctx.getImageData(400, y, 1, 1).data]) };
+      return { width: bitmap.width, height: bitmap.height, colors: [400, 1000, 2000].map(y => [...ctx.getImageData(400, y, 1, 1).data]) };
     }, download.url);
-    assert.equal(image.width, 800); assert.equal(image.height, 2250);
+    assert.equal(image.width, 800); assert.equal(image.height, 2050);
     assert.deepEqual(image.colors, [[255,0,0,255],[0,128,0,255],[0,0,255,255]]);
     assert.equal(await page.evaluate(() => scrollY), 200);
     assert.equal(await page.locator('header').evaluate(el => el.style.visibility), '');
+    const imageHeight = () => background.evaluate(async url => {
+      const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+      return bitmap.height;
+    }, download.url);
+    for (const [mode, amount, height] of [['pixels', 900, 900], ['screens', 2, 1200], ['pixels', 100, 100]]) {
+      const limited = await background.evaluate(options => window.captureListener({ type: 'capture', options }), { mode, amount });
+      assert.equal(limited.success, true, JSON.stringify(limited));
+      assert.equal(await imageHeight(), height);
+      assert.equal(await page.evaluate(() => scrollY), 200);
+    }
+    // Escape from the page after the first frame: save only completed content.
+    await background.evaluate(() => {
+      window.browser.tabs.captureVisibleTab = () => window.captureTab();
+    });
+    let frames = 0;
+    await background.exposeFunction('captureWithEscape', async () => {
+      const data = 'data:image/png;base64,' + (await page.screenshot()).toString('base64');
+      if (++frames === 1) await page.keyboard.press('Escape');
+      return data;
+    });
+    await background.evaluate(() => { window.browser.tabs.captureVisibleTab = () => window.captureWithEscape(); });
+    const stopped = await background.evaluate(() => window.captureListener({ type: 'capture' }));
+    assert.equal(stopped.success, true);
+    assert.equal(await imageHeight(), 600);
+    assert.equal(await page.evaluate(() => scrollY), 200);
+    assert.equal(await page.evaluate(() => '__scrollScreenshotState' in window), false);
     await background.evaluate(() => { window.testTab.url = 'about:config'; });
     const denied = await background.evaluate(() => window.captureListener({ type: 'capture' }));
     assert.match(denied.error, /regular web page/);
@@ -52,6 +78,6 @@ const assert = require('node:assert/strict');
     assert.equal(await page.evaluate(() => scrollY), 200);
     assert.equal(await page.locator('header').evaluate(el => el.style.visibility), '');
     assert.equal(await page.evaluate(() => '__scrollScreenshotState' in window), false);
-    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error.');
+    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

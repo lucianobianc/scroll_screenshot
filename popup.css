@@ -5,3 +5,7 @@ button { width: 100%; border: 0; border-radius: 8px; padding: 12px; font: inheri
 button:disabled { opacity: .6; cursor: wait; }
 button:focus-visible { outline: 3px solid #9685ff; outline-offset: 3px; }
 #status { margin-bottom: 0; }
+label { display: block; margin-top: 12px; }
+select, input { box-sizing: border-box; width: 100%; padding: 8px; margin: 5px 0 14px; font: inherit; }
+#stop { margin-top: 10px; background: #444; }
+[hidden] { display: none !important; }
