@@ -1,12 +1,14 @@
 /* global browser */
 let capturing = false;
 let stopRequested = false;
+let lastResult = null;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Runs in the page. All changes are restored even if capture fails.
 function pageStep(action, y) {
   const key = '__scrollScreenshotState';
   if (action === 'prepare') {
+    document.getElementById('__scrollScreenshotNotice')?.remove();
     if (window[key]) throw new Error('A capture is already running on this page.');
     // Apps such as Discord scroll a panel while the document remains stationary.
     const root = document.scrollingElement || document.documentElement;
@@ -96,6 +98,7 @@ async function capture(options = {}) {
   if (capturing) return { error: 'A screenshot is already in progress.' };
   capturing = true;
   stopRequested = false;
+  lastResult = null;
   let tab;
   let prepared = false;
   try {
@@ -123,40 +126,46 @@ async function capture(options = {}) {
     // Freeze the initial height so infinite-scroll pages cannot run indefinitely.
     const requested = mode === 'end' ? initial.height - start : amount * (mode === 'screens' ? initial.viewport : 1);
     const height = Math.min(initial.height, start + Math.max(1, Math.round(requested)));
-    for (let index = 0; covered < height; index++) {
-      if (index >= 100) throw new Error('This page is too long to capture (100 screens maximum).');
-      if (index > 0 && (stopRequested || (await step('status')).stopped)) break;
-      // Retain an overlap; append only rows beyond covered, using actual scrollTop.
-      if (index > 0) await step('scroll', Math.max(start, covered - Math.min(64, initial.viewport / 4)));
-      await pause(550);
-      const position = await step('status');
-      if (index > 0 && (stopRequested || position.stopped)) break;
-      const [active] = await browser.tabs.query({ active: true, windowId: tab.windowId });
-      if (active?.id !== tab.id) throw new Error('Capture stopped because you switched tabs. Please try again.');
-      const data = await browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-      const bitmap = await createImageBitmap(await (await fetch(data)).blob());
-      try {
-        if (!context) {
-          scale = bitmap.width / position.width;
-          canvas.width = Math.round(position.clip.width * scale);
-          canvas.height = Math.ceil((height - start) * scale);
-          if (canvas.height > 32767 || canvas.width * canvas.height > 100000000) {
-            throw new Error('This page is too large for a single image. Try reducing the browser zoom.');
+    let warning;
+    try {
+      for (let index = 0; covered < height; index++) {
+        if (index >= 100) throw new Error('This page is too long to capture (100 screens maximum).');
+        if (index > 0 && (stopRequested || (await step('status')).stopped)) break;
+        // Retain an overlap; append only rows beyond covered, using actual scrollTop.
+        if (index > 0) await step('scroll', Math.max(start, covered - Math.min(64, initial.viewport / 4)));
+        await pause(550);
+        const position = await step('status');
+        if (index > 0 && (stopRequested || position.stopped)) break;
+        const [active] = await browser.tabs.query({ active: true, windowId: tab.windowId });
+        if (active?.id !== tab.id) throw new Error('Capture stopped because you switched tabs. Please try again.');
+        const data = await browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+        const bitmap = await createImageBitmap(await (await fetch(data)).blob());
+        try {
+          if (!context) {
+            scale = bitmap.width / position.width;
+            canvas.width = Math.round(position.clip.width * scale);
+            canvas.height = Math.ceil((height - start) * scale);
+            if (canvas.height > 32767 || canvas.width * canvas.height > 100000000) {
+              throw new Error('This page is too large for a single image. Try reducing the browser zoom.');
+            }
+            context = canvas.getContext('2d');
+            if (!context) throw new Error('Unable to create the screenshot image.');
           }
-          context = canvas.getContext('2d');
-          if (!context) throw new Error('Unable to create the screenshot image.');
-        }
-        if (position.width !== initial.width || position.viewport !== initial.viewport) {
-          throw new Error('The browser was resized during capture. Please try again.');
-        }
-        const end = Math.min(height, position.y + position.viewport);
-        if (position.y > covered || end <= covered) throw new Error('This page prevents scrolling and cannot be captured fully.');
-        const sourceY = Math.round((position.clip.y + covered - position.y) * scale);
-        const pixels = Math.round((end - start) * scale) - Math.round((covered - start) * scale);
-        context.drawImage(bitmap, Math.round(position.clip.x * scale), sourceY, canvas.width, pixels,
-          0, Math.round((covered - start) * scale), canvas.width, pixels);
-        covered = end;
-      } finally { bitmap.close(); }
+          if (position.width !== initial.width || position.viewport !== initial.viewport) {
+            throw new Error('The browser was resized during capture. Please try again.');
+          }
+          const end = Math.min(height, position.y + position.viewport);
+          if (position.y > covered || end <= covered) throw new Error('This page prevents scrolling and cannot be captured fully.');
+          const sourceY = Math.round((position.clip.y + covered - position.y) * scale);
+          const pixels = Math.round((end - start) * scale) - Math.round((covered - start) * scale);
+          context.drawImage(bitmap, Math.round(position.clip.x * scale), sourceY, canvas.width, pixels,
+            0, Math.round((covered - start) * scale), canvas.width, pixels);
+          covered = end;
+        } finally { bitmap.close(); }
+      }
+    } catch (error) {
+      if (covered <= start) throw error;
+      warning = `Captura parcial: ${error.message}. O trecho já capturado foi enviado para Downloads.`;
     }
     // Trim the unused area when Escape ends a capture early.
     const output = document.createElement('canvas');
@@ -170,18 +179,41 @@ async function capture(options = {}) {
       const name = (tab.title || 'screenshot').replace(/[^a-z0-9_-]+/gi, '-').slice(0, 80);
       await browser.downloads.download({ url, filename: `${name}-${Date.now()}.png`, saveAs: false });
     } finally { setTimeout(() => URL.revokeObjectURL(url), 60000); }
-    return { success: true };
+    lastResult = { success: true, warning };
+    return lastResult;
   } catch (error) {
-    return { error: error.message || 'Unable to capture this page.' };
+    lastResult = { error: error.message || 'Unable to capture this page.' };
+    return lastResult;
   } finally {
     if (prepared) {
       try { await browser.tabs.executeScript(tab.id, { code: `(${pageStep.toString()})('restore')` }); }
       catch (_) { /* A closed or navigated tab no longer needs restoration. */ }
     }
+    if (tab && lastResult) {
+      const message = lastResult.error ? `Falha na captura: ${lastResult.error}` :
+        lastResult.warning || 'Captura enviada para Downloads. Confira a lista de downloads do Firefox.';
+      try {
+        await browser.tabs.executeScript(tab.id, { code: `(${showCaptureNotice.toString()})(${JSON.stringify(message)})` });
+      } catch (_) { /* The popup retains the result if the tab was closed or navigated. */ }
+    }
     capturing = false;
   }
 }
+function showCaptureNotice(message) {
+  document.getElementById('__scrollScreenshotNotice')?.remove();
+  const notice = document.createElement('div');
+  notice.id = '__scrollScreenshotNotice';
+  notice.setAttribute('role', 'status');
+  notice.textContent = message;
+  notice.style.cssText = 'position:fixed;top:16px;right:16px;max-width:420px;padding:16px;background:#222;color:#fff;font:14px/1.5 system-ui;z-index:2147483647;border:1px solid #888;border-radius:8px;cursor:pointer;';
+  notice.title = 'Clique para fechar';
+  notice.onclick = () => notice.remove();
+  document.documentElement.appendChild(notice);
+  setTimeout(() => notice.remove(), 15000);
+}
+
 browser.runtime.onMessage.addListener(message => {
+  if (message.type === 'status') return Promise.resolve({ running: capturing, result: lastResult });
   if (message.type === 'stop') { stopRequested = true; return Promise.resolve({ success: true }); }
   if (message.type === 'capture') return capture(message.options);
 });

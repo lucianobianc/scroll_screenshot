@@ -21,6 +21,8 @@ Temporary add-ons are removed when Firefox restarts. Distribution requires packa
 - Discord and other apps may virtualize messages or load content while scrolling; these changes can affect the result. Capture proceeds downward toward the initial bottom, not upward into older history.
 - Infinite scrolling, lazy loading, animation, and layout changes can affect the result. Load the content first for best results.
 - Captures are limited to 100 screens, 32,767 image pixels in height, and 100 million pixels total. Reduce browser zoom for very long pages.
+- If scrolling or a later frame fails, saves completed sections as a partial capture and shows a warning. Failures before any usable frame, encoding failures, and rejected downloads show an error.
+- The last result remains available when reopening the popup (until the extension restarts or a new capture starts). A temporary notice also appears on the page after completion.
 - Avoid switching tabs, resizing the window, or scrolling during capture.
 
 ## Development and validation

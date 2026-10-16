@@ -74,7 +74,12 @@ const assert = require('node:assert/strict');
       };
     });
     const interrupted = await background.evaluate(() => window.captureListener({ type: 'capture' }));
-    assert.match(interrupted.error, /Capture interrupted/);
+    assert.equal(interrupted.success, true);
+    assert.match(interrupted.warning, /Capture interrupted/);
+    assert.equal(await imageHeight(), 600);
+    const retained = await background.evaluate(() => window.captureListener({ type: 'status' }));
+    assert.equal(retained.running, false);
+    assert.match(retained.result.warning, /Capture interrupted/);
     assert.equal(await page.evaluate(() => scrollY), 200);
     assert.equal(await page.locator('header').evaluate(el => el.style.visibility), '');
     assert.equal(await page.evaluate(() => '__scrollScreenshotState' in window), false);
@@ -98,7 +103,9 @@ const assert = require('node:assert/strict');
     assert.equal(await imageHeight(), 1000);
     await page.locator('main').evaluate(el => { el.scrollTo = () => {}; });
     const blocked = await background.evaluate(() => window.captureListener({ type: 'capture' }));
-    assert.match(blocked.error, /prevents scrolling/);
+    assert.equal(blocked.success, true);
+    assert.match(blocked.warning, /prevents scrolling/);
+    assert.equal(await imageHeight(), 500);
     assert.equal(await page.evaluate(() => '__scrollScreenshotState' in window), false);
     await page.locator('main').evaluate(el => { delete el.scrollTo; });
     const panelStopped = await background.evaluate(() => {
@@ -128,6 +135,16 @@ const assert = require('node:assert/strict');
     for (let y = 0; y < rows.length; y++) {
       assert.deepEqual(rows[y], [(y + 200) % 251, Math.floor((y + 200) / 251), 100, 255], `Missing, duplicate, or obscured row ${y}`);
     }
+    assert.equal(await page.locator('form').evaluate(el => el.style.visibility), '');
+    assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
+    await background.evaluate(() => {
+      window.browser.downloads.download = async () => { throw new Error('Download rejected'); };
+    });
+    const rejected = await background.evaluate(() => window.captureListener({ type: 'capture', options: { mode: 'pixels', amount: 100 } }));
+    assert.match(rejected.error, /Download rejected/);
+    const failureStatus = await background.evaluate(() => window.captureListener({ type: 'status' }));
+    assert.match(failureStatus.result.error, /Download rejected/);
+    assert.match(await page.locator('#__scrollScreenshotNotice').textContent(), /Download rejected/);
     assert.equal(await page.locator('form').evaluate(el => el.style.visibility), '');
     assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
     console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save, nested panel stitching and limits, blocked panel error, every row across joins under a composer overlay.');

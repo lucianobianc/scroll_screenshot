@@ -24,7 +24,7 @@ button.addEventListener('click', async () => {
   status.textContent = 'Capturando… Esc ou Parar salva o trecho já capturado. Você pode fechar este painel e pressionar Esc na página.';
   try {
     const result = await browser.runtime.sendMessage({ type: 'capture', options: { mode: mode.value, amount: Number(amount.value) } });
-    status.textContent = result.error || 'Imagem salva em Downloads.';
+    status.textContent = result.error || result.warning || 'Captura enviada para Downloads.';
   } catch (error) {
     status.textContent = error.message;
   } finally {
@@ -34,3 +34,18 @@ button.addEventListener('click', async () => {
     stop.hidden = true;
   }
 });
+
+// Recover the outcome even when the popup was closed during capture.
+async function refreshStatus() {
+  try {
+    const state = await browser.runtime.sendMessage({ type: 'status' });
+    button.disabled = state.running;
+    mode.disabled = state.running;
+    amount.disabled = state.running;
+    stop.hidden = !state.running;
+    if (state.running) status.textContent = 'Capturando… Esc ou Parar salva o trecho já capturado.';
+    else if (state.result) status.textContent = state.result.error || state.result.warning || 'Captura enviada para Downloads.';
+  } catch (error) { status.textContent = error.message; }
+}
+refreshStatus();
+setInterval(refreshStatus, 1000);
