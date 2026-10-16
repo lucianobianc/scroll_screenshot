@@ -104,7 +104,7 @@ const assert = require('node:assert/strict');
     await page.locator('main').evaluate(el => { el.scrollTo = () => {}; });
     const blocked = await background.evaluate(() => window.captureListener({ type: 'capture' }));
     assert.equal(blocked.success, true);
-    assert.match(blocked.warning, /prevents scrolling/);
+    assert.match(blocked.warning, /rolagem parou antes do fim/);
     assert.equal(await imageHeight(), 500);
     assert.equal(await page.evaluate(() => '__scrollScreenshotState' in window), false);
     await page.locator('main').evaluate(el => { delete el.scrollTo; });
@@ -115,6 +115,26 @@ const assert = require('node:assert/strict');
     assert.equal(panelStopped.success, true, JSON.stringify(panelStopped));
     assert.equal(await imageHeight(), 500);
     assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
+    // Dynamic document height and a one-pixel metrics discrepancy at the bottom.
+    await page.setContent('<style>body{margin:0}</style><div id="content" style="height:2250px;background:linear-gradient(red,blue)"></div>');
+    await page.evaluate(() => {
+      scrollTo(0, 200);
+      const root = document.scrollingElement;
+      Object.defineProperty(root, 'scrollHeight', { configurable: true, get: () => document.getElementById('content').offsetHeight + 1 });
+    });
+    let shrinkFrames = 0;
+    await background.exposeFunction('captureShrinking', async () => {
+      const data = 'data:image/png;base64,' + (await page.screenshot()).toString('base64');
+      if (++shrinkFrames === 1) await page.locator('#content').evaluate(el => { el.style.height = '1500px'; });
+      return data;
+    });
+    await background.evaluate(() => { window.browser.tabs.captureVisibleTab = () => window.captureShrinking(); });
+    const shortened = await background.evaluate(() => window.captureListener({ type: 'capture' }));
+    assert.equal(shortened.success, true, JSON.stringify(shortened));
+    assert.equal(shortened.warning, undefined, 'A changed bottom is not a scrolling failure');
+    assert.equal(await imageHeight(), 1300);
+    await page.evaluate(() => { delete document.scrollingElement.scrollHeight; });
+    await background.evaluate(() => { window.browser.tabs.captureVisibleTab = () => window.captureTab(); });
     // A composer overlays the bottom of the scroller, as in chat applications.
     await page.setContent(`<style>html,body{margin:0;height:100%;overflow:hidden}
       main{position:absolute;left:100px;top:50px;width:600px;height:500px;overflow:auto}
@@ -125,18 +145,28 @@ const assert = require('node:assert/strict');
     await background.evaluate(() => { window.browser.tabs.captureVisibleTab = () => window.captureTab(); });
     const composerCapture = await background.evaluate(() => window.captureListener({ type: 'capture' }));
     assert.equal(composerCapture.success, true, JSON.stringify(composerCapture));
-    const rows = await background.evaluate(async url => {
+    const readRows = () => background.evaluate(async url => {
       const bitmap = await createImageBitmap(await (await fetch(url)).blob());
       const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
       const ctx = canvas.getContext('2d'); ctx.drawImage(bitmap, 0, 0);
       return Array.from({length: bitmap.height}, (_, y) => [...ctx.getImageData(300, y, 1, 1).data]);
     }, download.url);
+    const rows = await readRows();
     assert.equal(rows.length, 2050);
     for (let y = 0; y < rows.length; y++) {
       assert.deepEqual(rows[y], [(y + 200) % 251, Math.floor((y + 200) / 251), 100, 255], `Missing, duplicate, or obscured row ${y}`);
     }
     assert.equal(await page.locator('form').evaluate(el => el.style.visibility), '');
     assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
+    // Virtualized views can adjust scrollTop after a requested scroll.
+    await page.locator('main').evaluate(el => {
+      el.addEventListener('scroll', () => { el.scrollTop += 150; }, { once: true });
+    });
+    const jumped = await background.evaluate(() => window.captureListener({ type: 'capture' }));
+    assert.equal(jumped.success, true);
+    assert.equal(jumped.warning, undefined, 'A recoverable scroll adjustment must not abort capture');
+    assert.equal(await imageHeight(), 2050);
+    assert.deepEqual(await readRows(), rows, 'Scroll recovery must preserve every row');
     await background.evaluate(() => {
       window.browser.downloads.download = async () => { throw new Error('Download rejected'); };
     });
@@ -147,6 +177,6 @@ const assert = require('node:assert/strict');
     assert.match(await page.locator('#__scrollScreenshotNotice').textContent(), /Download rejected/);
     assert.equal(await page.locator('form').evaluate(el => el.style.visibility), '');
     assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
-    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save, nested panel stitching and limits, blocked panel error, every row across joins under a composer overlay.');
+    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save, nested panel stitching and limits, blocked panel error, every row across joins under a composer overlay, scroll-jump recovery, dynamic height and rounded bottom completion.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

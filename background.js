@@ -69,14 +69,16 @@ function pageStep(action, y) {
         }
       }
     }
-    state.target.scrollTo(state.x, y);
+    if (state.isRoot) window.scrollTo(state.x, y);
+    else state.target.scrollTo(state.x, y);
   }
   if (action === 'restore') {
     for (const [element, value, priority] of state.hidden) {
       if (value) element.style.setProperty('visibility', value, priority);
       else element.style.removeProperty('visibility');
     }
-    state.target.scrollTo(state.x, state.y);
+    if (state.isRoot) window.scrollTo(state.x, state.y);
+    else state.target.scrollTo(state.x, state.y);
     window.removeEventListener('keydown', state.onKey, true);
     state.style.remove();
     delete window[key];
@@ -91,7 +93,8 @@ function pageStep(action, y) {
   };
   if (clip.width <= 0 || clip.height <= 0) throw new Error('The scrolling panel is no longer visible.');
   return { stopped: state.stopped, y: state.target.scrollTop, width: innerWidth,
-    viewport: clip.height, clip, height: state.target.scrollHeight };
+    viewport: clip.height, clip, atBottom: state.target.scrollTop + state.target.clientHeight >= state.target.scrollHeight - 2,
+    height: state.target.scrollHeight };
 }
 
 async function capture(options = {}) {
@@ -125,7 +128,7 @@ async function capture(options = {}) {
     let covered = start;
     // Freeze the initial height so infinite-scroll pages cannot run indefinitely.
     const requested = mode === 'end' ? initial.height - start : amount * (mode === 'screens' ? initial.viewport : 1);
-    const height = Math.min(initial.height, start + Math.max(1, Math.round(requested)));
+    let height = Math.min(initial.height, start + Math.max(1, Math.round(requested)));
     let warning;
     try {
       for (let index = 0; covered < height; index++) {
@@ -134,8 +137,25 @@ async function capture(options = {}) {
         // Retain an overlap; append only rows beyond covered, using actual scrollTop.
         if (index > 0) await step('scroll', Math.max(start, covered - Math.min(64, initial.viewport / 4)));
         await pause(550);
-        const position = await step('status');
+        let position = await step('status');
         if (index > 0 && (stopRequested || position.stopped)) break;
+        // Virtualized lists may move the scroll offset while rendering. Recover
+        // before taking a screenshot, rather than treating any movement as a block.
+        for (let retry = 0; position.y > covered + 0.5 && retry < 2; retry++) {
+          await step('scroll', Math.max(start, covered - Math.min(64, initial.viewport / 4)));
+          await pause(550);
+          position = await step('status');
+        }
+        if (index > 0 && (stopRequested || position.stopped)) break;
+        height = Math.min(height, position.height);
+        const end = Math.min(height, position.y + position.viewport);
+        if (end <= covered + 0.5 && position.atBottom) break;
+        if (position.y > covered + 0.5) {
+          throw new Error(`A página mudou a posição de rolagem durante a captura (esperado até ${Math.round(covered)} px, recebido ${Math.round(position.y)} px)`);
+        }
+        if (end <= covered) {
+          throw new Error(`A rolagem parou antes do fim da página (posição ${Math.round(position.y)} px, altura ${position.height} px)`);
+        }
         const [active] = await browser.tabs.query({ active: true, windowId: tab.windowId });
         if (active?.id !== tab.id) throw new Error('Capture stopped because you switched tabs. Please try again.');
         const data = await browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
@@ -154,9 +174,7 @@ async function capture(options = {}) {
           if (position.width !== initial.width || position.viewport !== initial.viewport) {
             throw new Error('The browser was resized during capture. Please try again.');
           }
-          const end = Math.min(height, position.y + position.viewport);
-          if (position.y > covered || end <= covered) throw new Error('This page prevents scrolling and cannot be captured fully.');
-          const sourceY = Math.round((position.clip.y + covered - position.y) * scale);
+          const sourceY = Math.round((position.clip.y + Math.max(0, covered - position.y)) * scale);
           const pixels = Math.round((end - start) * scale) - Math.round((covered - start) * scale);
           context.drawImage(bitmap, Math.round(position.clip.x * scale), sourceY, canvas.width, pixels,
             0, Math.round((covered - start) * scale), canvas.width, pixels);

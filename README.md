@@ -21,6 +21,7 @@ Temporary add-ons are removed when Firefox restarts. Distribution requires packa
 - Discord and other apps may virtualize messages or load content while scrolling; these changes can affect the result. Capture proceeds downward toward the initial bottom, not upward into older history.
 - Infinite scrolling, lazy loading, animation, and layout changes can affect the result. Load the content first for best results.
 - Captures are limited to 100 screens, 32,767 image pixels in height, and 100 million pixels total. Reduce browser zoom for very long pages.
+- Rechecks the live content height and accepts small rounding differences at the bottom. If the app adjusts the scroll position during rendering, retries the requested position before reporting a gap.
 - If scrolling or a later frame fails, saves completed sections as a partial capture and shows a warning. Failures before any usable frame, encoding failures, and rejected downloads show an error.
 - The last result remains available when reopening the popup (until the extension restarts or a new capture starts). A temporary notice also appears on the page after completion.
 - Avoid switching tabs, resizing the window, or scrolling during capture.
@@ -35,7 +36,7 @@ Run the browser integration check with Node.js, Playwright, and Chromium availab
 node tests/capture.cjs
 ```
 
-The check uses `/usr/bin/chromium` by default; set `CHROMIUM_PATH` to override it. It exercises the capture logic against an actual scrolling page through a browser API adapter, checks output dimensions and colors across stitched sections, and verifies current-position capture, pixel/screen limits, Escape partial saves, download naming, state restoration, nested scrolling panels, blocked-scroll error handling, and every output row across joins with an overlaid message composer. It does not replace a Firefox extension API check.
+The check uses `/usr/bin/chromium` by default; set `CHROMIUM_PATH` to override it. It exercises the capture logic against an actual scrolling page through a browser API adapter, checks output dimensions and colors across stitched sections, and verifies current-position capture, pixel/screen limits, Escape partial saves, download naming, state restoration, nested scrolling panels, blocked-scroll error handling, and every output row across joins with an overlaid message composer, recovery after a scroll-position jump, and completion when content height changes or bottom metrics differ by one pixel. It does not replace a Firefox extension API check.
 
 For a manual Firefox check, scroll halfway down a page several screens tall with a fixed header, then start capture. Also test pixel/screen limits and Escape. Verify that the PNG starts at the original position and includes the bottom of the page in end mode, the header appears only once, and your original scroll position is restored. Also try a protected page and confirm that a readable error appears.
 
