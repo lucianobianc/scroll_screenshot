@@ -12,6 +12,14 @@ A simple Firefox extension that scrolls from your current position and saves the
 
 Temporary add-ons are removed when Firefox restarts. Distribution requires packaging and Mozilla signing.
 
+## Selected area capture
+
+Check **Selecionar uma área antes de capturar**, choose the desired limit, and click **Iniciar captura**. The popup closes; drag a rectangle on the page and release to start. Escape cancels before selection and stops/saves during capture.
+
+Select entirely inside the scrolling panel you want, excluding the composer, shadows, and other overlays. The rectangle remains fixed on screen. The extension scrolls by its height and stacks only new rows, accounting for the actual final scroll distance. Screen limits refer to the selected rectangle's height. The original scroll position is restored afterward.
+
+This mode assumes static content and layout. It does not compare images or hide website elements automatically. Capture ends when the panel reaches its scrolling limit; content that never passes through the selected rectangle is excluded. Leave the rectangle away from any overlay that would cover it. Selections must be at least 24 × 24 CSS pixels and fit within one panel. Selection inside embedded frames is not supported.
+
 ## Behavior and limits
 
 - Starts at the current scroll position and captures toward the initial bottom of the page, or the selected height limit, at the current viewport width. When the document does not scroll, automatically selects the largest visible scrolling panel (for example, Discord messages) and captures only that panel. Screen limits use the panel height. Horizontal overflow and additional panels are not expanded.

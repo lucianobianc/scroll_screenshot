@@ -2,6 +2,7 @@ const button = document.getElementById('capture');
 const stop = document.getElementById('stop');
 const status = document.getElementById('status');
 const mode = document.getElementById('mode');
+const selectArea = document.getElementById('select-area');
 const amount = document.getElementById('amount');
 mode.addEventListener('change', () => {
   document.getElementById('amount-row').hidden = mode.value === 'end';
@@ -23,7 +24,8 @@ button.addEventListener('click', async () => {
   stop.hidden = false;
   status.textContent = 'Capturando… Esc ou Parar salva o trecho já capturado. Você pode fechar este painel e pressionar Esc na página.';
   try {
-    const result = await browser.runtime.sendMessage({ type: 'capture', options: { mode: mode.value, amount: Number(amount.value) } });
+    const result = await browser.runtime.sendMessage({ type: 'capture', options: { mode: mode.value, amount: Number(amount.value), selectArea: selectArea.checked } });
+    if (result.started) { window.close(); return; }
     status.textContent = result.error || result.warning || 'Captura enviada para Downloads.';
   } catch (error) {
     status.textContent = error.message;
@@ -42,9 +44,10 @@ async function refreshStatus() {
     button.disabled = state.running;
     mode.disabled = state.running;
     amount.disabled = state.running;
+    selectArea.disabled = state.running;
     stop.hidden = !state.running;
     if (state.running) status.textContent = 'Capturando… Esc ou Parar salva o trecho já capturado.';
-    else if (state.result) status.textContent = state.result.error || state.result.warning || 'Captura enviada para Downloads.';
+    else if (state.result) status.textContent = state.result.error || state.result.warning || (state.result.cancelled ? 'Seleção cancelada.' : 'Captura enviada para Downloads.');
   } catch (error) { status.textContent = error.message; }
 }
 refreshStatus();

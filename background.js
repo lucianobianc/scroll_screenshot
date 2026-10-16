@@ -5,7 +5,7 @@ let lastResult = null;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Runs in the page. All changes are restored even if capture fails.
-function pageStep(action, y) {
+function pageStep(action, y, region) {
   const key = '__scrollScreenshotState';
   if (action === 'prepare') {
     document.getElementById('__scrollScreenshotNotice')?.remove();
@@ -28,17 +28,36 @@ function pageStep(action, y) {
     }).map(element => ({ element, box: visibleBox(element) }))
       .filter(item => item.box.width > 100 && item.box.height > 100)
       .sort((a, b) => b.box.width * b.box.height - a.box.width * a.box.height);
-    const target = root.scrollHeight > innerHeight + 1 ? root : (candidates[0]?.element || root);
+    let target = root.scrollHeight > innerHeight + 1 ? root : (candidates[0]?.element || root);
+    if (region) {
+      if (!['x', 'y', 'width', 'height'].every(key => Number.isFinite(region[key])) ||
+          region.width < 24 || region.height < 24 || region.x < 0 || region.y < 0 ||
+          region.x + region.width > innerWidth || region.y + region.height > innerHeight) {
+        throw new Error('Selecione uma área válida dentro da janela.');
+      }
+      target = root;
+      for (let node = document.elementFromPoint(region.x + region.width / 2, region.y + region.height / 2);
+           node && node !== root; node = node.parentElement) {
+        if (node.scrollHeight > node.clientHeight + 1 && /^(auto|scroll|overlay)$/.test(getComputedStyle(node).overflowY)) {
+          target = node;
+          break;
+        }
+      }
+      const box = target === root ? { x: 0, y: 0, width: innerWidth, height: innerHeight } : visibleBox(target);
+      if (region.x < box.x || region.y < box.y || region.x + region.width > box.x + box.width || region.y + region.height > box.y + box.height) {
+        throw new Error('Selecione a área inteiramente dentro de um único painel de rolagem.');
+      }
+    }
     const isRoot = target === root;
     const style = document.createElement('style');
     style.textContent = 'html, body, * { scroll-behavior: auto !important; scroll-snap-type: none !important; overflow-anchor: none !important; }';
-    window[key] = { target, isRoot, x: target.scrollLeft, y: target.scrollTop, style, hidden: [], fixedHidden: false, stopped: false };
+    window[key] = { target, isRoot, region, regionOffset: region ? region.y - (isRoot ? 0 : target.getBoundingClientRect().top + target.clientTop) : 0, x: target.scrollLeft, y: target.scrollTop, style, hidden: [], fixedHidden: false, stopped: false };
     window[key].onKey = event => {
       if (event.key === 'Escape') { window[key].stopped = true; event.preventDefault(); }
     };
     window.addEventListener('keydown', window[key].onKey, true);
     document.documentElement.appendChild(style);
-    if (!isRoot) {
+    if (!isRoot && !region) {
       // A sibling composer/header can cover the panel without reducing clientHeight.
       // Hide only small covering branches, preserving layout and restoring inline styles.
       const box = visibleBox(target);
@@ -60,7 +79,7 @@ function pageStep(action, y) {
   const state = window[key];
   if (!state) throw new Error('The page changed during capture.');
   if (action === 'scroll') {
-    if (!state.fixedHidden) {
+    if (!state.region && !state.fixedHidden) {
       state.fixedHidden = true;
       for (const element of (state.isRoot ? document : state.target).querySelectorAll('*')) {
         if (!element.contains(state.target) && !state.hidden.some(([hidden]) => hidden === element) && ['fixed', 'sticky'].includes(getComputedStyle(element).position)) {
@@ -69,8 +88,8 @@ function pageStep(action, y) {
         }
       }
     }
-    if (state.isRoot) window.scrollTo(state.x, y);
-    else state.target.scrollTo(state.x, y);
+    if (state.isRoot) window.scrollTo(state.x, y - state.regionOffset);
+    else state.target.scrollTo(state.x, y - state.regionOffset);
   }
   if (action === 'restore') {
     for (const [element, value, priority] of state.hidden) {
@@ -85,16 +104,16 @@ function pageStep(action, y) {
     return;
   }
   const rect = state.target.getBoundingClientRect();
-  const clip = state.isRoot ? { x: 0, y: 0, width: innerWidth, height: innerHeight } : {
+  const clip = state.region || (state.isRoot ? { x: 0, y: 0, width: innerWidth, height: innerHeight } : {
     x: Math.max(0, rect.left + state.target.clientLeft),
     y: Math.max(0, rect.top + state.target.clientTop),
     width: Math.min(state.target.clientWidth, innerWidth - Math.max(0, rect.left + state.target.clientLeft)),
     height: Math.min(state.target.clientHeight, innerHeight - Math.max(0, rect.top + state.target.clientTop))
-  };
+  });
   if (clip.width <= 0 || clip.height <= 0) throw new Error('The scrolling panel is no longer visible.');
-  return { stopped: state.stopped, y: state.target.scrollTop, width: innerWidth,
+  return { stopped: state.stopped, y: state.target.scrollTop + state.regionOffset, width: innerWidth, windowHeight: innerHeight,
     viewport: clip.height, clip, atBottom: state.target.scrollTop + state.target.clientHeight >= state.target.scrollHeight - 2,
-    height: state.target.scrollHeight };
+    height: state.region ? state.target.scrollHeight - state.target.clientHeight + state.regionOffset + clip.height : state.target.scrollHeight };
 }
 
 async function capture(options = {}) {
@@ -109,8 +128,13 @@ async function capture(options = {}) {
     if (!tab || !/^https?:\/\//.test(tab.url || '')) {
       throw new Error('Open a regular web page first. Firefox internal pages cannot be captured.');
     }
+    let region = options.region;
+    if (options.selectArea) {
+      [region] = await browser.tabs.executeScript(tab.id, { file: 'selection.js' });
+      if (!region) { lastResult = { cancelled: true }; return lastResult; }
+    }
     const step = async (action, y = 0) => (await browser.tabs.executeScript(tab.id, {
-      code: `(${pageStep.toString()})(${JSON.stringify(action)}, ${Number(y)})`
+      code: `(${pageStep.toString()})(${JSON.stringify(action)}, ${Number(y)}, ${JSON.stringify(region || null)})`
     }))[0];
     const mode = options.mode || 'end';
     if (!['end', 'pixels', 'screens'].includes(mode)) throw new Error('Invalid capture mode.');
@@ -135,14 +159,14 @@ async function capture(options = {}) {
         if (index >= 100) throw new Error('This page is too long to capture (100 screens maximum).');
         if (index > 0 && (stopRequested || (await step('status')).stopped)) break;
         // Retain an overlap; append only rows beyond covered, using actual scrollTop.
-        if (index > 0) await step('scroll', Math.max(start, covered - Math.min(64, initial.viewport / 4)));
+        if (index > 0) await step('scroll', Math.max(start, covered - (region ? 0 : Math.min(64, initial.viewport / 4))));
         await pause(550);
         let position = await step('status');
         if (index > 0 && (stopRequested || position.stopped)) break;
         // Virtualized lists may move the scroll offset while rendering. Recover
         // before taking a screenshot, rather than treating any movement as a block.
         for (let retry = 0; position.y > covered + 0.5 && retry < 2; retry++) {
-          await step('scroll', Math.max(start, covered - Math.min(64, initial.viewport / 4)));
+          await step('scroll', Math.max(start, covered - (region ? 0 : Math.min(64, initial.viewport / 4))));
           await pause(550);
           position = await step('status');
         }
@@ -171,7 +195,7 @@ async function capture(options = {}) {
             context = canvas.getContext('2d');
             if (!context) throw new Error('Unable to create the screenshot image.');
           }
-          if (position.width !== initial.width || position.viewport !== initial.viewport) {
+          if (position.width !== initial.width || position.windowHeight !== initial.windowHeight || position.viewport !== initial.viewport) {
             throw new Error('The browser was resized during capture. Please try again.');
           }
           const sourceY = Math.round((position.clip.y + Math.max(0, covered - position.y)) * scale);
@@ -209,7 +233,7 @@ async function capture(options = {}) {
     }
     if (tab && lastResult) {
       const message = lastResult.error ? `Falha na captura: ${lastResult.error}` :
-        lastResult.warning || 'Captura enviada para Downloads. Confira a lista de downloads do Firefox.';
+        lastResult.cancelled ? 'Seleção cancelada.' : lastResult.warning || 'Captura enviada para Downloads. Confira a lista de downloads do Firefox.';
       try {
         await browser.tabs.executeScript(tab.id, { code: `(${showCaptureNotice.toString()})(${JSON.stringify(message)})` });
       } catch (_) { /* The popup retains the result if the tab was closed or navigated. */ }
@@ -233,5 +257,10 @@ function showCaptureNotice(message) {
 browser.runtime.onMessage.addListener(message => {
   if (message.type === 'status') return Promise.resolve({ running: capturing, result: lastResult });
   if (message.type === 'stop') { stopRequested = true; return Promise.resolve({ success: true }); }
+  if (message.type === 'capture' && message.options?.selectArea) {
+    if (capturing) return Promise.resolve({ error: 'Uma captura já está em andamento.' });
+    capture(message.options);
+    return Promise.resolve({ started: true });
+  }
   if (message.type === 'capture') return capture(message.options);
 });
