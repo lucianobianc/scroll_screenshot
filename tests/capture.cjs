@@ -53,7 +53,7 @@ const assert = require('node:assert/strict');
     let frames = 0;
     await background.exposeFunction('captureWithEscape', async () => {
       const data = 'data:image/png;base64,' + (await page.screenshot()).toString('base64');
-      if (++frames === 1) await page.keyboard.press('Escape');
+      if (++frames >= 1) await page.keyboard.press('Escape');
       return data;
     });
     await background.evaluate(() => { window.browser.tabs.captureVisibleTab = () => window.captureWithEscape(); });
@@ -78,6 +78,36 @@ const assert = require('node:assert/strict');
     assert.equal(await page.evaluate(() => scrollY), 200);
     assert.equal(await page.locator('header').evaluate(el => el.style.visibility), '');
     assert.equal(await page.evaluate(() => '__scrollScreenshotState' in window), false);
-    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save.');
+    await page.setContent('<style>html,body{margin:0;height:100%;overflow:hidden}main{position:fixed;left:100px;top:50px;width:600px;height:500px;overflow:auto}section{height:750px}</style><main><section style="background:red"></section><section style="background:green"></section><section style="background:blue"></section></main>');
+    await page.locator('main').evaluate(el => { el.scrollTop = 200; });
+    await background.evaluate(() => { window.browser.tabs.captureVisibleTab = () => window.captureTab(); });
+    const nested = await background.evaluate(() => window.captureListener({ type: 'capture' }));
+    assert.equal(nested.success, true, JSON.stringify(nested));
+    assert.equal(await imageHeight(), 2050, 'Nested scroll panel must capture beyond the visible viewport');
+    const panelImage = await background.evaluate(async url => {
+      const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+      const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(bitmap, 0, 0);
+      return { width: bitmap.width, colors: [400, 1000, 2000].map(y => [...ctx.getImageData(300, y, 1, 1).data]) };
+    }, download.url);
+    assert.equal(panelImage.width, 600);
+    assert.deepEqual(panelImage.colors, [[255,0,0,255],[0,128,0,255],[0,0,255,255]]);
+    assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
+    const panelLimit = await background.evaluate(() => window.captureListener({ type: 'capture', options: { mode: 'screens', amount: 2 } }));
+    assert.equal(panelLimit.success, true, JSON.stringify(panelLimit));
+    assert.equal(await imageHeight(), 1000);
+    await page.locator('main').evaluate(el => { el.scrollTo = () => {}; });
+    const blocked = await background.evaluate(() => window.captureListener({ type: 'capture' }));
+    assert.match(blocked.error, /prevents scrolling/);
+    assert.equal(await page.evaluate(() => '__scrollScreenshotState' in window), false);
+    await page.locator('main').evaluate(el => { delete el.scrollTo; });
+    const panelStopped = await background.evaluate(() => {
+      window.browser.tabs.captureVisibleTab = () => window.captureWithEscape();
+      return window.captureListener({ type: 'capture' });
+    });
+    assert.equal(panelStopped.success, true, JSON.stringify(panelStopped));
+    assert.equal(await imageHeight(), 500);
+    assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
+    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save, nested panel stitching and limits, blocked panel error.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

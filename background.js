@@ -8,9 +8,29 @@ function pageStep(action, y) {
   const key = '__scrollScreenshotState';
   if (action === 'prepare') {
     if (window[key]) throw new Error('A capture is already running on this page.');
+    // Apps such as Discord scroll a panel while the document remains stationary.
+    const root = document.scrollingElement || document.documentElement;
+    const visibleBox = element => {
+      const rect = element.getBoundingClientRect();
+      const left = Math.max(0, rect.left + element.clientLeft);
+      const top = Math.max(0, rect.top + element.clientTop);
+      return { x: left, y: top,
+        width: Math.max(0, Math.min(innerWidth, rect.left + element.clientLeft + element.clientWidth) - left),
+        height: Math.max(0, Math.min(innerHeight, rect.top + element.clientTop + element.clientHeight) - top) };
+    };
+    const candidates = [...document.querySelectorAll('body *')].filter(element => {
+      const css = getComputedStyle(element);
+      return /^(auto|scroll|overlay)$/.test(css.overflowY) &&
+        element.scrollHeight > element.clientHeight + 1 &&
+        css.visibility !== 'hidden' && css.display !== 'none';
+    }).map(element => ({ element, box: visibleBox(element) }))
+      .filter(item => item.box.width > 100 && item.box.height > 100)
+      .sort((a, b) => b.box.width * b.box.height - a.box.width * a.box.height);
+    const target = root.scrollHeight > innerHeight + 1 ? root : (candidates[0]?.element || root);
+    const isRoot = target === root;
     const style = document.createElement('style');
     style.textContent = 'html, body, * { scroll-behavior: auto !important; scroll-snap-type: none !important; overflow-anchor: none !important; }';
-    window[key] = { x: scrollX, y: scrollY, style, hidden: [], stopped: false };
+    window[key] = { target, isRoot, x: target.scrollLeft, y: target.scrollTop, style, hidden: [], stopped: false };
     window[key].onKey = event => {
       if (event.key === 'Escape') { window[key].stopped = true; event.preventDefault(); }
     };
@@ -21,28 +41,36 @@ function pageStep(action, y) {
   if (!state) throw new Error('The page changed during capture.');
   if (action === 'scroll') {
     if (!state.hidden.length) {
-      for (const element of document.querySelectorAll('body *')) {
-        if (['fixed', 'sticky'].includes(getComputedStyle(element).position)) {
+      for (const element of (state.isRoot ? document : state.target).querySelectorAll('*')) {
+        if (!element.contains(state.target) && ['fixed', 'sticky'].includes(getComputedStyle(element).position)) {
           state.hidden.push([element, element.style.getPropertyValue('visibility'), element.style.getPropertyPriority('visibility')]);
           element.style.setProperty('visibility', 'hidden', 'important');
         }
       }
     }
-    window.scrollTo(state.x, y);
+    state.target.scrollTo(state.x, y);
   }
   if (action === 'restore') {
     for (const [element, value, priority] of state.hidden) {
       if (value) element.style.setProperty('visibility', value, priority);
       else element.style.removeProperty('visibility');
     }
-    window.scrollTo(state.x, state.y);
+    state.target.scrollTo(state.x, state.y);
     window.removeEventListener('keydown', state.onKey, true);
     state.style.remove();
     delete window[key];
     return;
   }
-  return { stopped: state.stopped, y: scrollY, width: innerWidth, viewport: innerHeight,
-    height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0) };
+  const rect = state.target.getBoundingClientRect();
+  const clip = state.isRoot ? { x: 0, y: 0, width: innerWidth, height: innerHeight } : {
+    x: Math.max(0, rect.left + state.target.clientLeft),
+    y: Math.max(0, rect.top + state.target.clientTop),
+    width: Math.min(state.target.clientWidth, innerWidth - Math.max(0, rect.left + state.target.clientLeft)),
+    height: Math.min(state.target.clientHeight, innerHeight - Math.max(0, rect.top + state.target.clientTop))
+  };
+  if (clip.width <= 0 || clip.height <= 0) throw new Error('The scrolling panel is no longer visible.');
+  return { stopped: state.stopped, y: state.target.scrollTop, width: innerWidth,
+    viewport: clip.height, clip, height: state.target.scrollHeight };
 }
 
 async function capture(options = {}) {
@@ -90,7 +118,7 @@ async function capture(options = {}) {
       try {
         if (!context) {
           scale = bitmap.width / position.width;
-          canvas.width = bitmap.width;
+          canvas.width = Math.round(position.clip.width * scale);
           canvas.height = Math.ceil((height - start) * scale);
           if (canvas.height > 32767 || canvas.width * canvas.height > 100000000) {
             throw new Error('This page is too large for a single image. Try reducing the browser zoom.');
@@ -102,11 +130,11 @@ async function capture(options = {}) {
           throw new Error('The browser was resized during capture. Please try again.');
         }
         const end = Math.min(height, position.y + position.viewport);
-        if (end <= covered) throw new Error('This page prevents scrolling and cannot be captured fully.');
-        const sourceY = Math.round((covered - position.y) * scale);
+        if (position.y > covered || end <= covered) throw new Error('This page prevents scrolling and cannot be captured fully.');
+        const sourceY = Math.round((position.clip.y + covered - position.y) * scale);
         const pixels = Math.round((end - start) * scale) - Math.round((covered - start) * scale);
-        context.drawImage(bitmap, 0, sourceY, bitmap.width, pixels,
-          0, Math.round((covered - start) * scale), bitmap.width, pixels);
+        context.drawImage(bitmap, Math.round(position.clip.x * scale), sourceY, canvas.width, pixels,
+          0, Math.round((covered - start) * scale), canvas.width, pixels);
         covered = end;
       } finally { bitmap.close(); }
     }
