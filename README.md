@@ -15,6 +15,7 @@ Temporary add-ons are removed when Firefox restarts. Distribution requires packa
 ## Behavior and limits
 
 - Starts at the current scroll position and captures toward the initial bottom of the page, or the selected height limit, at the current viewport width. When the document does not scroll, automatically selects the largest visible scrolling panel (for example, Discord messages) and captures only that panel. Screen limits use the panel height. Horizontal overflow and additional panels are not expanded.
+- Temporarily hides small external overlays covering the scrolling panel, such as a message composer, without changing layout. Captures overlapping sections and appends only new rows to avoid gaps at joins. Overlay styles are restored afterward.
 - Restores your scroll position after capture, including after errors. Fixed and sticky elements appear in the first section and are hidden in later sections to avoid repeated overlays.
 - Firefox internal pages, the Mozilla add-ons site, and other protected pages cannot be captured.
 - Discord and other apps may virtualize messages or load content while scrolling; these changes can affect the result. Capture proceeds downward toward the initial bottom, not upward into older history.
@@ -32,7 +33,7 @@ Run the browser integration check with Node.js, Playwright, and Chromium availab
 node tests/capture.cjs
 ```
 
-The check uses `/usr/bin/chromium` by default; set `CHROMIUM_PATH` to override it. It exercises the capture logic against an actual scrolling page through a browser API adapter, checks output dimensions and colors across stitched sections, and verifies current-position capture, pixel/screen limits, Escape partial saves, download naming, state restoration, nested scrolling panels, and blocked-scroll error handling. It does not replace a Firefox extension API check.
+The check uses `/usr/bin/chromium` by default; set `CHROMIUM_PATH` to override it. It exercises the capture logic against an actual scrolling page through a browser API adapter, checks output dimensions and colors across stitched sections, and verifies current-position capture, pixel/screen limits, Escape partial saves, download naming, state restoration, nested scrolling panels, blocked-scroll error handling, and every output row across joins with an overlaid message composer. It does not replace a Firefox extension API check.
 
 For a manual Firefox check, scroll halfway down a page several screens tall with a fixed header, then start capture. Also test pixel/screen limits and Escape. Verify that the PNG starts at the original position and includes the bottom of the page in end mode, the header appears only once, and your original scroll position is restored. Also try a protected page and confirm that a readable error appears.
 

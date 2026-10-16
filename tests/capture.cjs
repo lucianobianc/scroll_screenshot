@@ -108,6 +108,28 @@ const assert = require('node:assert/strict');
     assert.equal(panelStopped.success, true, JSON.stringify(panelStopped));
     assert.equal(await imageHeight(), 500);
     assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
-    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save, nested panel stitching and limits, blocked panel error.');
+    // A composer overlays the bottom of the scroller, as in chat applications.
+    await page.setContent(`<style>html,body{margin:0;height:100%;overflow:hidden}
+      main{position:absolute;left:100px;top:50px;width:600px;height:500px;overflow:auto}
+      form{position:absolute;z-index:10;left:100px;top:480px;width:600px;height:70px;margin:0;background:magenta}</style>
+      <main>${Array.from({length:2250}, (_, y) => `<div style="height:1px;background:rgb(${y % 251},${Math.floor(y / 251)},100)"></div>`).join('')}</main>
+      <form><textarea aria-label="Message">Message composer</textarea></form>`);
+    await page.locator('main').evaluate(el => { el.scrollTop = 200; });
+    await background.evaluate(() => { window.browser.tabs.captureVisibleTab = () => window.captureTab(); });
+    const composerCapture = await background.evaluate(() => window.captureListener({ type: 'capture' }));
+    assert.equal(composerCapture.success, true, JSON.stringify(composerCapture));
+    const rows = await background.evaluate(async url => {
+      const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+      const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(bitmap, 0, 0);
+      return Array.from({length: bitmap.height}, (_, y) => [...ctx.getImageData(300, y, 1, 1).data]);
+    }, download.url);
+    assert.equal(rows.length, 2050);
+    for (let y = 0; y < rows.length; y++) {
+      assert.deepEqual(rows[y], [(y + 200) % 251, Math.floor((y + 200) / 251), 100, 255], `Missing, duplicate, or obscured row ${y}`);
+    }
+    assert.equal(await page.locator('form').evaluate(el => el.style.visibility), '');
+    assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
+    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save, nested panel stitching and limits, blocked panel error, every row across joins under a composer overlay.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

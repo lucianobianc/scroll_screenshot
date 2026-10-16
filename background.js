@@ -30,19 +30,38 @@ function pageStep(action, y) {
     const isRoot = target === root;
     const style = document.createElement('style');
     style.textContent = 'html, body, * { scroll-behavior: auto !important; scroll-snap-type: none !important; overflow-anchor: none !important; }';
-    window[key] = { target, isRoot, x: target.scrollLeft, y: target.scrollTop, style, hidden: [], stopped: false };
+    window[key] = { target, isRoot, x: target.scrollLeft, y: target.scrollTop, style, hidden: [], fixedHidden: false, stopped: false };
     window[key].onKey = event => {
       if (event.key === 'Escape') { window[key].stopped = true; event.preventDefault(); }
     };
     window.addEventListener('keydown', window[key].onKey, true);
     document.documentElement.appendChild(style);
+    if (!isRoot) {
+      // A sibling composer/header can cover the panel without reducing clientHeight.
+      // Hide only small covering branches, preserving layout and restoring inline styles.
+      const box = visibleBox(target);
+      for (const fraction of [0.01, 0.1, 0.2, 0.8, 0.9, 0.99]) {
+        const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height * fraction);
+        if (!hit || target.contains(hit) || hit.contains(target)) continue;
+        let overlay;
+        for (let node = hit; node && !node.contains(target); node = node.parentElement) {
+          const rect = node.getBoundingClientRect();
+          if (rect.width >= box.width / 2 && rect.height > 0 && rect.height <= box.height * 0.45) overlay = node;
+        }
+        if (overlay && !window[key].hidden.some(([element]) => element === overlay)) {
+          window[key].hidden.push([overlay, overlay.style.getPropertyValue('visibility'), overlay.style.getPropertyPriority('visibility')]);
+          overlay.style.setProperty('visibility', 'hidden', 'important');
+        }
+      }
+    }
   }
   const state = window[key];
   if (!state) throw new Error('The page changed during capture.');
   if (action === 'scroll') {
-    if (!state.hidden.length) {
+    if (!state.fixedHidden) {
+      state.fixedHidden = true;
       for (const element of (state.isRoot ? document : state.target).querySelectorAll('*')) {
-        if (!element.contains(state.target) && ['fixed', 'sticky'].includes(getComputedStyle(element).position)) {
+        if (!element.contains(state.target) && !state.hidden.some(([hidden]) => hidden === element) && ['fixed', 'sticky'].includes(getComputedStyle(element).position)) {
           state.hidden.push([element, element.style.getPropertyValue('visibility'), element.style.getPropertyPriority('visibility')]);
           element.style.setProperty('visibility', 'hidden', 'important');
         }
@@ -107,7 +126,8 @@ async function capture(options = {}) {
     for (let index = 0; covered < height; index++) {
       if (index >= 100) throw new Error('This page is too long to capture (100 screens maximum).');
       if (index > 0 && (stopRequested || (await step('status')).stopped)) break;
-      if (index > 0) await step('scroll', covered);
+      // Retain an overlap; append only rows beyond covered, using actual scrollTop.
+      if (index > 0) await step('scroll', Math.max(start, covered - Math.min(64, initial.viewport / 4)));
       await pause(550);
       const position = await step('status');
       if (index > 0 && (stopRequested || position.stopped)) break;
