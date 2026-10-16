@@ -1,2 +1,37 @@
-# scroll_screenshot
-A scroll screenshot extension for Firefox. 
+# Scroll Screenshot
+
+A simple Firefox extension that saves a vertically scrolling web page as one PNG image. Images are processed locally; nothing is uploaded.
+
+## Install in Firefox for development
+
+1. Open `about:debugging#/runtime/this-firefox`.
+2. Click **Load Temporary Add-on** and select this folder's `manifest.json`.
+3. Open a normal web page, click the extension in Firefox's extensions menu, then click **Capture full page**.
+4. Keep the tab visible until the PNG is saved to your Downloads folder.
+
+Temporary add-ons are removed when Firefox restarts. Distribution requires packaging and Mozilla signing.
+
+## Behavior and limits
+
+- Captures the initial page height at the current viewport width. Horizontal overflow and nested scrolling areas are not expanded.
+- Restores your scroll position after capture, including after errors. Fixed and sticky elements appear in the first section and are hidden in later sections to avoid repeated overlays.
+- Firefox internal pages, the Mozilla add-ons site, and other protected pages cannot be captured.
+- Infinite scrolling, lazy loading, animation, and layout changes can affect the result. Load the content first for best results.
+- Captures are limited to 100 screens, 32,767 image pixels in height, and 100 million pixels total. Reduce browser zoom for very long pages.
+- Avoid switching tabs, resizing the window, or scrolling during capture.
+
+## Development and validation
+
+No build step or runtime dependencies are required. Edit the files and click **Reload** on the extension's `about:debugging` entry.
+
+Run the browser integration check with Node.js, Playwright, and Chromium available:
+
+```sh
+node tests/capture.cjs
+```
+
+The check uses `/usr/bin/chromium` by default; set `CHROMIUM_PATH` to override it. It exercises the capture logic against an actual scrolling page through a browser API adapter, checks output dimensions and colors across stitched sections, and verifies download naming, state restoration, and error handling. It does not replace a Firefox extension API check.
+
+For a manual Firefox check, capture a page several screens tall with a fixed header. Verify that the PNG includes the bottom of the page, the header appears only once, and your original scroll position is restored. Also try a protected page and confirm that a readable error appears.
+
+Permissions: `activeTab` permits capture and temporary page access after you click the extension; `downloads` saves the resulting PNG. No persistent access to all websites is requested.

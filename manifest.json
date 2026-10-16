@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "Scroll Screenshot",
+  "version": "1.0.0",
+  "description": "Capture a whole page as a single PNG image.",
+  "permissions": ["activeTab", "downloads"],
+  "background": { "scripts": ["background.js"] },
+  "browser_action": {
+    "default_title": "Capture full page",
+    "default_popup": "popup.html"
+  },
+  "browser_specific_settings": {
+    "gecko": { "id": "scroll-screenshot@lucianobianc", "strict_min_version": "109.0" }
+  }
+}
