@@ -11,13 +11,21 @@ const assert = require('node:assert/strict');
     await page.evaluate(() => scrollTo(0, 200));
     const background = await browser.newPage();
     let download;
+    const downloads = [];
     await background.exposeFunction('executeInTab', async ({ code, file }) => [await page.evaluate(file ? fs.readFileSync(path.join(__dirname, '..', file), 'utf8') : code)]);
     await background.exposeFunction('captureTab', async () => 'data:image/png;base64,' + (await page.screenshot()).toString('base64'));
-    await background.exposeFunction('recordDownload', value => { download = value; return 1; });
+    await background.exposeFunction('recordDownload', value => { download = value; downloads.push(value); return downloads.length; });
     await background.evaluate(() => {
+      window.canvasCreations = 0;
+      window.captureCanvasCounts = [];
+      const createElement = document.createElement.bind(document);
+      document.createElement = (tag, ...args) => {
+        if (tag.toLowerCase() === 'canvas') window.canvasCreations++;
+        return createElement(tag, ...args);
+      };
       window.testTab = { id: 1, windowId: 1, url: 'https://example.org/', title: 'Test page' };
       window.browser = {
-        tabs: { query: async () => [window.testTab], executeScript: (_, options) => window.executeInTab(options), captureVisibleTab: () => window.captureTab() },
+        tabs: { query: async () => [window.testTab], executeScript: (_, options) => window.executeInTab(options), captureVisibleTab: () => { window.captureCanvasCounts.push(window.canvasCreations); return window.captureTab(); } },
         downloads: { download: value => window.recordDownload(value) },
         runtime: { onMessage: { addListener: fn => { window.captureListener = fn; } } }
       };
@@ -25,6 +33,8 @@ const assert = require('node:assert/strict');
     await background.addScriptTag({ content: fs.readFileSync(path.join(__dirname, '../background.js'), 'utf8') });
     const result = await background.evaluate(() => window.captureListener({ type: 'capture' }));
     assert.equal(result.success, true, JSON.stringify(result));
+    assert.equal(await background.evaluate(() => window.canvasCreations), 1);
+    assert.ok((await background.evaluate(() => window.captureCanvasCounts)).every(count => count === 0), 'No canvas may be allocated while scrolling');
     assert.match(download.filename, /^Test-page-\d+\.png$/);
     const image = await background.evaluate(async url => {
       const bitmap = await createImageBitmap(await (await fetch(url)).blob());
@@ -244,6 +254,87 @@ const assert = require('node:assert/strict');
     assert.match(await page.locator('#__scrollScreenshotNotice').textContent(), /Download rejected/);
     assert.equal(await page.locator('form').evaluate(el => el.style.visibility), '');
     assert.equal(await page.locator('main').evaluate(el => el.scrollTop), 200);
-    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save, nested panel stitching and limits, blocked panel error, every row across joins under a composer overlay, scroll-jump recovery, dynamic height and rounded bottom completion, region selection/cancellation, all selected-area rows and limits.');
+    // A real page taller than the previous single-canvas limit now saves in parts.
+    await background.evaluate(() => {
+      window.browser.downloads.download = value => window.recordDownload(value);
+      window.browser.tabs.captureVisibleTab = () => window.captureTab();
+    });
+    await page.setViewportSize({ width: 200, height: 5000 });
+    const stops = Array.from({ length: 251 }, (_, y) => `rgb(${y},0,100) ${y}px, rgb(${y},0,100) ${y + 1}px`).join(',');
+    await page.setContent(`<!doctype html><style>body{margin:0}</style><div style="height:34001px;background:repeating-linear-gradient(to bottom,${stops})"></div>`);
+    downloads.length = 0;
+    let canvasBefore = await background.evaluate(() => window.canvasCreations);
+    const tall = await background.evaluate(() => window.captureListener({ type: 'capture' }));
+    assert.equal(tall.success, true, JSON.stringify(tall));
+    assert.equal(tall.warning, undefined);
+    assert.equal(downloads.length, 2);
+    assert.match(downloads[0].filename, /-parte-01\.png$/);
+    assert.match(downloads[1].filename, /-parte-02\.png$/);
+    assert.deepEqual(tall.files, downloads.map(item => item.filename));
+    assert.equal(await background.evaluate(() => window.canvasCreations), canvasBefore + 1, 'Reuse one output canvas for all parts');
+    async function readParts() {
+      return background.evaluate(async urls => {
+        const parts = [];
+        for (const url of urls) {
+          const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+          const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+          const ctx = canvas.getContext('2d'); ctx.drawImage(bitmap, 0, 0);
+          const pixels = ctx.getImageData(100, 0, 1, bitmap.height).data;
+          parts.push({ width: bitmap.width, height: bitmap.height, pixels: Array.from(pixels) });
+          bitmap.close();
+        }
+        return parts;
+      }, downloads.map(item => item.url));
+    }
+    function verifyParts(parts, total) {
+      let row = 0;
+      for (const part of parts) {
+        assert.equal(part.width, 200);
+        for (let y = 0; y < part.height; y++, row++) {
+          assert.deepEqual(part.pixels.slice(y * 4, y * 4 + 4), [row % 251, 0, 100, 255], `Part boundary or seam at row ${row}`);
+        }
+      }
+      assert.equal(row, total);
+    }
+    let parts = await readParts();
+    assert.deepEqual(parts.map(part => part.height), [32767, 1234]);
+    verifyParts(parts, 34001);
+    assert.equal(await page.evaluate(() => scrollY), 0);
+    // Pixel-count limits can split a single screenshot across multiple output files.
+    await background.evaluate(() => { IMAGE_LIMITS.maxPixels = 90000; });
+    downloads.length = 0;
+    canvasBefore = await background.evaluate(() => window.canvasCreations);
+    const limitedParts = await background.evaluate(() => window.captureListener({ type: 'capture', options: { mode: 'pixels', amount: 1100 } }));
+    assert.equal(limitedParts.success, true, JSON.stringify(limitedParts));
+    assert.equal(downloads.length, 3);
+    assert.equal(await background.evaluate(() => window.canvasCreations), canvasBefore + 1);
+    parts = await readParts();
+    assert.deepEqual(parts.map(part => part.height), [450, 450, 200]);
+    verifyParts(parts, 1100);
+    // Esc still saves all captured rows, even when they span several files.
+    downloads.length = 0;
+    await background.evaluate(() => { window.browser.tabs.captureVisibleTab = () => window.captureWithEscape(); });
+    const stoppedParts = await background.evaluate(() => window.captureListener({ type: 'capture' }));
+    assert.equal(stoppedParts.success, true, JSON.stringify(stoppedParts));
+    parts = await readParts();
+    assert.equal(parts.length, 12);
+    verifyParts(parts, 5000);
+    // If a later download fails, report which files have already been queued.
+    downloads.length = 0;
+    await background.evaluate(() => {
+      let count = 0;
+      window.browser.tabs.captureVisibleTab = () => window.captureTab();
+      window.browser.downloads.download = value => {
+        if (++count === 2) throw new Error('Second download rejected');
+        return window.recordDownload(value);
+      };
+    });
+    const failedPart = await background.evaluate(() => window.captureListener({ type: 'capture', options: { mode: 'pixels', amount: 1100 } }));
+    assert.match(failedPart.error, /Second download rejected/);
+    assert.equal(failedPart.files.length, 1);
+    assert.equal(downloads.length, 1);
+    assert.match(failedPart.error, /1 parte/);
+    assert.equal(await page.evaluate(() => scrollY), 0);
+    console.log('Passed: stitched dimensions and pixels, download filename, scroll/style restoration, restricted-page error, current-position capture, pixel/screen limits, Escape partial save, nested panel stitching and limits, blocked panel error, every row across joins under a composer overlay, scroll-jump recovery, dynamic height and rounded bottom completion, region selection/cancellation, all selected-area rows and limits, single final canvas, numbered multi-part output beyond 32,767 px, every row across part boundaries, Esc and download failures with parts.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

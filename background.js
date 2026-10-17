@@ -2,6 +2,8 @@
 let capturing = false;
 let stopRequested = false;
 let lastResult = null;
+let phase = 'idle';
+const IMAGE_LIMITS = { maxHeight: 32767, maxPixels: 100000000, maxStoredBytes: 256 * 1024 * 1024 };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Runs in the page. All changes are restored even if capture fails.
@@ -116,11 +118,64 @@ function pageStep(action, y, region) {
     height: state.region ? state.target.scrollHeight - state.target.clientHeight + state.regionOffset + clip.height : state.target.scrollHeight };
 }
 
+// Only output assembly uses a canvas. Captured PNG blobs remain compressed until
+// decoded one at a time, and the same canvas is resized/reused for every part.
+async function saveFrames(frames, width, height, baseName, files) {
+  if (!frames.length || !Number.isInteger(width) || width < 1 || !Number.isInteger(height) || height < 1) {
+    throw new Error('Nenhum trecho de imagem disponível para salvar.');
+  }
+  const partHeight = Math.min(IMAGE_LIMITS.maxHeight, Math.floor(IMAGE_LIMITS.maxPixels / width));
+  if (width > IMAGE_LIMITS.maxHeight || partHeight < 1) throw new Error('A largura da captura excede o limite de imagem.');
+  const parts = Math.ceil(height / partHeight);
+  const canvas = document.createElement('canvas');
+  let frameIndex = 0;
+  try {
+    for (let part = 0; part < parts; part++) {
+      const top = part * partHeight;
+      const bottom = Math.min(height, top + partHeight);
+      canvas.height = 0;
+      canvas.width = width;
+      canvas.height = bottom - top;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Não foi possível montar a imagem.');
+      for (let index = frameIndex; index < frames.length && frames[index].top < bottom; index++) {
+        const frame = frames[index];
+        const first = Math.max(top, frame.top);
+        const last = Math.min(bottom, frame.top + frame.height);
+        if (last <= first) continue;
+        const bitmap = await createImageBitmap(frame.blob);
+        try {
+          context.drawImage(bitmap, frame.x, frame.y + first - frame.top, width, last - first,
+            0, first - top, width, last - first);
+        } finally { bitmap.close(); }
+      }
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('O navegador não conseguiu gerar a imagem.');
+      const suffix = parts > 1 ? `-parte-${String(part + 1).padStart(Math.max(2, String(parts).length), '0')}` : '';
+      const filename = `${baseName}${suffix}.png`;
+      const url = URL.createObjectURL(blob);
+      try {
+        await browser.downloads.download({ url, filename, saveAs: false });
+        files.push(filename);
+      } finally { setTimeout(() => URL.revokeObjectURL(url), 60000); }
+      // A frame crossing a part boundary is retained until the next part uses it.
+      while (frameIndex < frames.length && frames[frameIndex].top + frames[frameIndex].height <= bottom) {
+        frames[frameIndex++].blob = null;
+      }
+    }
+  } finally {
+    canvas.width = canvas.height = 0;
+  }
+}
+
 async function capture(options = {}) {
   if (capturing) return { error: 'A screenshot is already in progress.' };
   capturing = true;
   stopRequested = false;
   lastResult = null;
+  phase = options.selectArea ? 'selection' : 'capture';
+  const frames = [];
+  const files = [];
   let tab;
   let prepared = false;
   try {
@@ -133,6 +188,7 @@ async function capture(options = {}) {
       [region] = await browser.tabs.executeScript(tab.id, { file: 'selection.js' });
       if (!region) { lastResult = { cancelled: true }; return lastResult; }
     }
+    phase = 'capture';
     const step = async (action, y = 0) => (await browser.tabs.executeScript(tab.id, {
       code: `(${pageStep.toString()})(${JSON.stringify(action)}, ${Number(y)}, ${JSON.stringify(region || null)})`
     }))[0];
@@ -145,9 +201,9 @@ async function capture(options = {}) {
     const initial = await step('prepare');
     prepared = true;
     await pause(400);
-    const canvas = document.createElement('canvas');
-    let context;
     let scale;
+    let imageWidth;
+    let storedBytes = 0;
     const start = initial.y;
     let covered = start;
     // Freeze the initial height so infinite-scroll pages cannot run indefinitely.
@@ -183,62 +239,61 @@ async function capture(options = {}) {
         const [active] = await browser.tabs.query({ active: true, windowId: tab.windowId });
         if (active?.id !== tab.id) throw new Error('Capture stopped because you switched tabs. Please try again.');
         const data = await browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-        const bitmap = await createImageBitmap(await (await fetch(data)).blob());
+        const blob = await (await fetch(data)).blob();
+        const bitmap = await createImageBitmap(blob);
         try {
-          if (!context) {
+          if (scale === undefined) {
             scale = bitmap.width / position.width;
-            canvas.width = Math.round(position.clip.width * scale);
-            canvas.height = Math.ceil((height - start) * scale);
-            if (canvas.height > 32767 || canvas.width * canvas.height > 100000000) {
-              throw new Error('This page is too large for a single image. Try reducing the browser zoom.');
-            }
-            context = canvas.getContext('2d');
-            if (!context) throw new Error('Unable to create the screenshot image.');
+            imageWidth = Math.round(position.clip.width * scale);
           }
           if (position.width !== initial.width || position.windowHeight !== initial.windowHeight || position.viewport !== initial.viewport) {
             throw new Error('The browser was resized during capture. Please try again.');
           }
           const sourceY = Math.round((position.clip.y + Math.max(0, covered - position.y)) * scale);
           const pixels = Math.round((end - start) * scale) - Math.round((covered - start) * scale);
-          context.drawImage(bitmap, Math.round(position.clip.x * scale), sourceY, canvas.width, pixels,
-            0, Math.round((covered - start) * scale), canvas.width, pixels);
+          if (storedBytes + blob.size > IMAGE_LIMITS.maxStoredBytes) {
+            throw new Error('Limite de memória dos recortes atingido');
+          }
+          if (pixels > 0) {
+            frames.push({ blob, x: Math.round(position.clip.x * scale), y: sourceY,
+              top: Math.round((covered - start) * scale), height: pixels });
+            storedBytes += blob.size;
+          }
           covered = end;
         } finally { bitmap.close(); }
       }
     } catch (error) {
       if (covered <= start) throw error;
-      warning = `Captura parcial: ${error.message}. O trecho já capturado foi enviado para Downloads.`;
+      warning = `Captura parcial: ${error.message}.`;
     }
-    // Trim the unused area when Escape ends a capture early.
-    const output = document.createElement('canvas');
-    output.width = canvas.width;
-    output.height = Math.round((covered - start) * scale);
-    output.getContext('2d').drawImage(canvas, 0, 0);
-    const blob = await new Promise(resolve => output.toBlob(resolve, 'image/png'));
-    if (!blob) throw new Error('The browser could not encode this image.');
-    const url = URL.createObjectURL(blob);
-    try {
-      const name = (tab.title || 'screenshot').replace(/[^a-z0-9_-]+/gi, '-').slice(0, 80);
-      await browser.downloads.download({ url, filename: `${name}-${Date.now()}.png`, saveAs: false });
-    } finally { setTimeout(() => URL.revokeObjectURL(url), 60000); }
-    lastResult = { success: true, warning };
+    // Restore the page before spending time assembling/encoding the output.
+    try { await step('restore'); } catch (_) { /* The tab may have closed. */ }
+    prepared = false;
+    phase = 'assembly';
+    const name = (tab.title || 'screenshot').replace(/[^a-z0-9_-]+/gi, '-').slice(0, 80);
+    await saveFrames(frames, imageWidth, Math.round((covered - start) * scale), `${name}-${Date.now()}`, files);
+    const message = files.length > 1 ? `${files.length} imagens numeradas enviadas para Downloads.` : 'Captura enviada para Downloads.';
+    lastResult = { success: true, message, files, warning: warning ? `${warning} ${message}` : undefined };
     return lastResult;
   } catch (error) {
-    lastResult = { error: error.message || 'Unable to capture this page.' };
+    lastResult = { error: (error.message || 'Unable to capture this page.') +
+      (files.length ? ` ${files.length} parte(s) já enviada(s) para Downloads; as restantes não foram salvas.` : ''), files };
     return lastResult;
   } finally {
+    frames.length = 0;
     if (prepared) {
       try { await browser.tabs.executeScript(tab.id, { code: `(${pageStep.toString()})('restore')` }); }
       catch (_) { /* A closed or navigated tab no longer needs restoration. */ }
     }
     if (tab && lastResult) {
       const message = lastResult.error ? `Falha na captura: ${lastResult.error}` :
-        lastResult.cancelled ? 'Seleção cancelada.' : lastResult.warning || 'Captura enviada para Downloads. Confira a lista de downloads do Firefox.';
+        lastResult.cancelled ? 'Seleção cancelada.' : lastResult.warning || lastResult.message || 'Captura enviada para Downloads. Confira a lista de downloads do Firefox.';
       try {
         await browser.tabs.executeScript(tab.id, { code: `(${showCaptureNotice.toString()})(${JSON.stringify(message)})` });
       } catch (_) { /* The popup retains the result if the tab was closed or navigated. */ }
     }
     capturing = false;
+    phase = 'idle';
   }
 }
 function showCaptureNotice(message) {
@@ -255,7 +310,7 @@ function showCaptureNotice(message) {
 }
 
 browser.runtime.onMessage.addListener(message => {
-  if (message.type === 'status') return Promise.resolve({ running: capturing, result: lastResult });
+  if (message.type === 'status') return Promise.resolve({ running: capturing, phase, result: lastResult });
   if (message.type === 'stop') { stopRequested = true; return Promise.resolve({ success: true }); }
   if (message.type === 'capture' && message.options?.selectArea) {
     if (capturing) return Promise.resolve({ error: 'Uma captura já está em andamento.' });

@@ -26,7 +26,7 @@ button.addEventListener('click', async () => {
   try {
     const result = await browser.runtime.sendMessage({ type: 'capture', options: { mode: mode.value, amount: Number(amount.value), selectArea: selectArea.checked } });
     if (result.started) { window.close(); return; }
-    status.textContent = result.error || result.warning || 'Captura enviada para Downloads.';
+    status.textContent = result.error || result.warning || result.message || 'Captura enviada para Downloads.';
   } catch (error) {
     status.textContent = error.message;
   } finally {
@@ -45,9 +45,9 @@ async function refreshStatus() {
     mode.disabled = state.running;
     amount.disabled = state.running;
     selectArea.disabled = state.running;
-    stop.hidden = !state.running;
-    if (state.running) status.textContent = 'Capturando… Esc ou Parar salva o trecho já capturado.';
-    else if (state.result) status.textContent = state.result.error || state.result.warning || (state.result.cancelled ? 'Seleção cancelada.' : 'Captura enviada para Downloads.');
+    stop.hidden = !state.running || state.phase === 'assembly';
+    if (state.running) status.textContent = state.phase === 'assembly' ? 'Montando e salvando a imagem…' : state.phase === 'selection' ? 'Arraste para selecionar a área na página. Esc cancela.' : 'Capturando… Esc ou Parar salva o trecho já capturado.';
+    else if (state.result) status.textContent = state.result.error || state.result.warning || state.result.message || (state.result.cancelled ? 'Seleção cancelada.' : 'Captura enviada para Downloads.');
   } catch (error) { status.textContent = error.message; }
 }
 refreshStatus();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Scroll Screenshot",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Capture from your current position, with pixel/screen limits and Escape to stop.",
   "permissions": ["activeTab", "downloads"],
   "background": { "scripts": ["background.js"] },
